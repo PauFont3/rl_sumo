@@ -9,7 +9,8 @@
 This project implements a Reinforcement Learning agent using **PPO (Proximal Policy Optimization)**. The agent's goal is to push the opponent out of the *Dohyo* (ring) while remaining inside, using data from simulated sensors (LiDAR/Distance and relative positioning).
 
 ### The Brain
-* **Observation Space:** * Self Position (x, y).
+* **Observation Space:**
+    * Self Position (x, y).
     * Enemy Position (x, y).
     * Yaw (Orientation).
     * Distance to edge (Survival instinct).
