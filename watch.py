@@ -7,7 +7,7 @@ def main():
     env = SumoEnv()
     env.reset()
     print("[INFO] Environment initialized")
-    model_path = "models/PPO/model_torero.zip" 
+    model_path = "models/PPO/model_fase3_final.zip" 
     
     print(f"\n[INFO] Loading model: {model_path}")
     
@@ -20,7 +20,7 @@ def main():
         print(f"Error loading model: {e}")
         return
 
-    episodes = 5
+    episodes = 10
     for ep in range(episodes): 
         print(f"--- Episode {ep + 1} ---")
         obs, _ = env.reset()
@@ -31,10 +31,10 @@ def main():
        
         while not done:
             step_count += 1
-            # PREGUNTAR AL CEREBRO QUÉ HACER
+            # Predict action
             action, _states = model.predict(obs, deterministic=True)
             
-            # Ejecutar acción
+            # Execute action
             obs, reward, done, truncated, info = env.step(action)
             total_reward += reward
 

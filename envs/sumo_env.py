@@ -6,6 +6,7 @@ import random
 import pygame
 
 from physics.mapper import convert_given_points_to_robot_parameters
+from envs.enemy_ai import RandomEnemyStrategy, AggressiveEnemyStrategy, DefensiveEnemyStrategy
 
 # ----------------------------
 # --- SIMULATION CONSTANTS ---
@@ -60,6 +61,7 @@ class SumoEnv(gym.Env):
         self.enemy_position = np.array([2.0, 0.0], dtype=np.float32)
         self.enemy_velocity = np.array([0.0, 0.0], dtype=np.float32)
         self.enemy_mass = 5.0 
+        self.strategy = None
         
         # --- Action Space ---
         # - Continuous actions: [acceleration, direction]
@@ -95,14 +97,23 @@ class SumoEnv(gym.Env):
         random_design = [random.randint(0, 4) for _ in range(5)]
         self.agent_designed = convert_given_points_to_robot_parameters(random_design)
 
-        # --- RESET POSITIONS AND VELOCITIES ---
+        # --- RESET AGENT PHYSICS ---
         self.agent_position = np.array([-2.0, 0.0], dtype=np.float32)
         self.agent_velocity = np.array([0.0, 0.0], dtype=np.float32)
         self.agent_orientation = random.uniform(0, 2 * math.pi) # Random initial orientation
 
-        # --- RESET ENEMY ROBOT POSITIONS AND VELOCITIES ---
+        # --- SELECT ENEMY STRATEGY ---
+        available_strategies = [
+            RandomEnemyStrategy(), 
+            AggressiveEnemyStrategy(), 
+            DefensiveEnemyStrategy()
+        ]
+        self.strategy = random.choice(available_strategies)
+
+        # --- RESET ENEMY PHYSICS ---
         self.enemy_position = np.array([2.0, 0.0], dtype=np.float32)
         self.enemy_velocity = np.array([0.0, 0.0], dtype=np.float32)
+
 
         return self._get_obs(), {}        
 
@@ -118,145 +129,17 @@ class SumoEnv(gym.Env):
         """
         self.current_step_count += 1
 
-        # --- UPDATE RING SIZE ---
-        if (self.current_step_count >= SHRINK_START_STEP):
-            self.ring_radius -= SHRINK_RATE
-            self.radius = max(1.0, self.ring_radius) # Minimum radius
+        self.update_ring_size()
 
-        # --- PROCESS ACTION ---
-        # Limit actions for safety
-        throttle = np.clip(action[0], -1.0, 1.0) # Forward / Backward
-        steering = np.clip(action[1], -1.0, 1.0) # Left / Right
+        self.update_agents_physics(action)
+        self.update_enemy_physics()
 
-        # --------------------------------
-        # --- AGENT PHYSICS SIMULATION ---
-        # --------------------------------
-        if self.agent_designed is None:
-            mass, force, mu, agility = 5.0, 50.0, 0.5, 1.0
-        else:
-            mass = self.agent_designed["Mass"]          # Units: Kg
-            force = self.agent_designed["Force"]        # Units: N
-            mu = self.agent_designed["mu"]              # Friction coefficient
-            agility = self.agent_designed["Agility"]    # Units: rad/s
-        
-        # Apply Steering
-        self.agent_orientation += steering * agility * self.dt  
+        self.handle_collisions()
 
-        # Apply Acceleration
-        current_force = throttle * force
-        acceleration = current_force / mass # Units: m/s^2
+        self.apply_movement_and_friction()
 
-        # Update velocity (x,y)
-        self.agent_velocity[0] += math.cos(self.agent_orientation) * acceleration * self.dt
-        self.agent_velocity[1] += math.sin(self.agent_orientation) * acceleration * self.dt
-
-        # Velocity loss due to friction forces
-        friction_force = mu * mass * 9.81
-        speed_loss = (friction_force / mass) * self.dt
-        current_speed = math.sqrt(self.agent_velocity[0]**2 + self.agent_velocity[1]**2)
-
-        # ------------------------------------
-        # --- ENEMY PHYSICS (Bot Follower) ---
-        #-------------------------------------
-        # Vector between the enemy and the agent
-        dx_enemy = self.agent_position[0] - self.enemy_position[0]
-        dy_enemy = self.agent_position[1] - self.enemy_position[1]
-        dist_to_player = math.sqrt(dx_enemy**2 + dy_enemy**2)
-
-        if dist_to_player > 0:
-            angle_to_player = math.atan2(dy_enemy, dx_enemy)
-            enemy_force = 40.0 
-            enemy_accel = enemy_force / self.enemy_mass
-
-            self.enemy_velocity[0] += math.cos(angle_to_player) * enemy_accel * self.dt
-            self.enemy_velocity[1] += math.sin(angle_to_player) * enemy_accel * self.dt
-
-        # ------------------
-        # --- COLLISIONS ---
-        # ------------------
-        dx = self.agent_position[0] - self.enemy_position[0]
-        dy = self.agent_position[1] - self.enemy_position[1]
-        dist_bots = math.sqrt(dx**2 + dy**2)
-        min_dist = 1.0 # Radius robot A (0.5) + Radius robot B (0.5)
-        
-        if dist_bots < min_dist:
-            # Collision detected
-            # Normal vector (collision direction)
-            nx = dx / dist_bots
-            ny = dy / dist_bots
-
-            # Relative velocity 
-            vx_rel = self.agent_velocity[0] - self.enemy_velocity[0]
-            vy_rel = self.agent_velocity[1] - self.enemy_velocity[1]
-
-            vel_along_normal = (vx_rel * nx) + (vy_rel * ny)
-
-            # If its aproaching, calculate the push forces
-            if vel_along_normal < 0:
-                restitution = 1.1 # Restitution coefficient (Rebot) (>1 -> makes it more "bouncy")
-                j = -(1 + restitution) * vel_along_normal
-                j /= (1/mass + 1/self.enemy_mass)
-                
-                # Appluy impulse to both robots
-                impulse_x = j * nx
-                impulse_y = j * ny
-                
-                # Update velocities based on impulse
-                self.agent_velocity[0] += impulse_x / mass
-                self.agent_velocity[1] += impulse_y / mass
-                self.enemy_velocity[0] -= impulse_x / self.enemy_mass
-                self.enemy_velocity[1] -= impulse_y / self.enemy_mass
-
-        # --------------------------------------
-        # --- UPDATE POSITIONS WITH FRICTION ---
-        # --------------------------------------
-        # Friction factor (decrease velocity over time)
-        friction_factor = 1.0 - (mu * self.dt) 
-        self.agent_velocity *= friction_factor
-        self.enemy_velocity *= friction_factor
-
-        # Update positions
-        self.agent_position += self.agent_velocity * self.dt
-        self.enemy_position += self.enemy_velocity * self.dt
-
-        # Calculate distances to center of the ring
-        dist_agent_center = np.linalg.norm(self.agent_position)
-        dist_enemy_center = np.linalg.norm(self.enemy_position)
-
-        # ------------------------------------
-        # --- REWARD AND ENDING CONDITIONS ---
-        # ------------------------------------
-        reward = 0.0
-        terminated = False  # Episode ended (Victory / Defeat)
-        truncated = False   # Episode truncated (Max steps reached)
-
-        # Punishment for time spent
-        reward -= 0.1
-
-        # Reward for keeping the enemy far from the center
-        reward += dist_enemy_center * 0.1
-
-        # Warning for being close to the edge
-        if dist_agent_center > (self.ring_radius * 0.8):
-            reward -= 0.1       
-
-        # --- DEFEAT CONDITION ---
-        if dist_agent_center > self.ring_radius:
-            terminated = True
-            reward = -100.0
-            print("DEFEAT! Your agent has fallen off the ring")
-        
-        # --- VICTORY CONDITION ---
-        elif dist_enemy_center > self.ring_radius:
-            terminated = True
-            reward = 100.0
-            print("VICTORY! Enemy has fallen off the ring")
-        
-        # --- TIME LIMIT CONDITION
-        if self.current_step_count >= 1000:
-            print("SURVIVED!")
-            truncated = True
-        
+        reward, terminated, truncated = self.compute_rewards_and_termination()
+    
         return self._get_obs(), reward, terminated, truncated, {}
 
 
@@ -347,3 +230,146 @@ class SumoEnv(gym.Env):
         # Refresh screen
         pygame.display.flip()
         self.clock.tick(30) # Limit to 30 FPS
+
+
+
+    # -----------------------------
+    # --- AUXILIARY FUNCTIONS -----
+    # -----------------------------
+    
+    def update_ring_size(self):
+        if (self.current_step_count >= SHRINK_START_STEP):
+            self.ring_radius -= SHRINK_RATE
+            self.radius = max(1.0, self.ring_radius) # Minimum radius
+
+    
+    def update_agents_physics(self, action):
+        # Limit actions for safety
+        throttle = np.clip(action[0], -1.0, 1.0) # Forward / Backward
+        steering = np.clip(action[1], -1.0, 1.0) # Left / Right
+
+        if self.agent_designed is None:
+            mass, force, mu, agility = 5.0, 50.0, 0.5, 1.0
+        else:
+            mass = self.agent_designed["Mass"]          # Units: Kg
+            force = self.agent_designed["Force"]        # Units: N
+            mu = self.agent_designed["mu"]              # Friction coefficient
+            agility = self.agent_designed["Agility"]    # Units: rad/s
+        
+        # Apply Steering
+        self.agent_orientation += steering * agility * self.dt  
+
+        # Apply Acceleration
+        acceleration = (throttle * force) / mass # Units: m/s^2
+
+        # Update velocity (x,y)
+        self.agent_velocity[0] += math.cos(self.agent_orientation) * acceleration * self.dt
+        self.agent_velocity[1] += math.sin(self.agent_orientation) * acceleration * self.dt
+
+
+    def update_enemy_physics(self):
+        # Select strategy
+        fx, fy = self.strategy.execute_strategy(self.enemy_position, self.agent_position)
+        
+        # F = m * a
+        accel_x = fx / self.enemy_mass
+        accel_y = fy / self.enemy_mass
+
+        self.enemy_velocity[0] += accel_x * self.dt
+        self.enemy_velocity[1] += accel_y * self.dt
+    
+
+    def handle_collisions(self):
+        dx = self.agent_position[0] - self.enemy_position[0]
+        dy = self.agent_position[1] - self.enemy_position[1]
+        dist_bots = math.sqrt(dx**2 + dy**2)
+        min_dist = 1.0 # Radius robot A (0.5) + Radius robot B (0.5)
+        
+        if dist_bots < min_dist:
+            # Collision detected
+            # Normal vector (collision direction)
+            nx = dx / dist_bots
+            ny = dy / dist_bots
+
+            # Relative velocity 
+            vx_rel = self.agent_velocity[0] - self.enemy_velocity[0]
+            vy_rel = self.agent_velocity[1] - self.enemy_velocity[1]
+            vel_along_normal = (vx_rel * nx) + (vy_rel * ny)
+
+            # If its aproaching, calculate the elastic collision response
+            if vel_along_normal < 0:
+                restitution = 1.1 # Restitution coefficient (Rebot) (>1 -> makes it more "bouncy") 
+               
+                agent_mass = 5.0
+                if self.agent_designed is not None:
+                    agent_mass = self.agent_designed["Mass"]  # Units: Kg
+                enemy_mass = self.enemy_mass
+                
+                j = -(1 + restitution) * vel_along_normal
+                j /= (1/agent_mass + 1/enemy_mass)
+                
+                # Apply impulse to both robots
+                impulse_x = j * nx
+                impulse_y = j * ny
+                
+                # Update velocities based on impulse
+                self.agent_velocity[0] += impulse_x / agent_mass
+                self.agent_velocity[1] += impulse_y / agent_mass
+                self.enemy_velocity[0] -= impulse_x / enemy_mass
+                self.enemy_velocity[1] -= impulse_y / enemy_mass
+
+    
+    def apply_movement_and_friction(self):
+
+        if self.agent_designed is None:
+            mu = 0.5
+        else:
+            mu = self.agent_designed["mu"]
+
+        # Friction factor (decrease velocity over time)
+        friction_factor = 1.0 - (mu * self.dt) 
+        self.agent_velocity *= friction_factor
+        self.enemy_velocity *= friction_factor
+
+        # Update positions
+        self.agent_position += self.agent_velocity * self.dt
+        self.enemy_position += self.enemy_velocity * self.dt
+
+    
+    def compute_rewards_and_termination(self):
+        dist_agent_center = np.linalg.norm(self.agent_position)
+        dist_enemy_center = np.linalg.norm(self.enemy_position)
+
+        reward = 0.0
+
+        # Punishment for time spent
+        reward -= 0.1
+        
+        # Reward for keeping the enemy far from the center
+        reward += dist_enemy_center * 0.1
+        
+        # Warning for being close to the edge
+        if dist_agent_center > (self.ring_radius * 0.8):
+            reward -= 0.1    
+        
+        terminated = False  # Episode ended (Victory / Defeat)
+        truncated = False   # Episode truncated (Max steps reached)
+        
+        # --- CHECK DEFEAT CONDITION ---
+        if dist_agent_center > self.ring_radius:
+            terminated = True
+            reward = -100.0
+            print(f"DEFEAT! Strategy: {type(self.strategy).__name__}")
+        
+        # --- CHECK VICTORY CONDITION ---
+        elif dist_enemy_center > self.ring_radius:
+            terminated = True
+            reward = 100.0
+            print(f"VICTORY! vs: {type(self.strategy).__name__}")
+        
+        # --- CHECK TIME LIMIT CONDITION
+        if self.current_step_count >= 1000:
+            print("SURVIVED!")
+            truncated = True
+        
+        return reward, terminated, truncated
